@@ -1,0 +1,11 @@
+{
+  "name": "cvsjp-server",
+  "version": "1.0.0",
+  "description": "lets go",
+  "main": "cool_file.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC"
+}
