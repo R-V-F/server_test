@@ -1,10 +1,14 @@
+/**
+ * ex:node batch_start.js 1,2,3,4,5,6 -> tracks country ids 1,2,3,4,5,6
+ */
+
 const {Builder, Browser, By, Key, until} = require('selenium-webdriver');
 const firefox = require('selenium-webdriver/firefox');
 const express = require('express');
 const app = express();
 const port = 3003;
 const mysql = require("mysql2");
-
+const NUMBER_OF_CHANNELS_PER_COUNTRY = 10;
 
 /**
  *  
@@ -61,6 +65,29 @@ async function getLives(channels_list, check_lives_driver) { //returns updated l
     const end = Date.now();
     console.log(`Execution time: ${(end - start)/1000}s`);
     return list_of_streams;
+
+}
+
+async function getLives_v2(channels_obj_list, check_lives_driver) { //returns updated list
+    const start = Date.now();
+    let list_of_obj_streams = [];
+    for(channelObj of channels_obj_list) {
+        console.log(`Trying to get ${channelObj.ChannelName}`)
+        try{
+            await check_lives_driver.get(channelObj.ChannelUrl);
+            channelObj.live_url = await getLivesFromChannel(check_lives_driver);
+
+            list_of_obj_streams.push(channelObj);
+        }
+
+        catch(e){
+            console.log('Something went wrong with get_lives()\n' + e);
+        }
+    }
+    //console.log(list_of_streams);
+    const end = Date.now();
+    console.log(`Execution time: ${(end - start)/1000}s`);
+    return list_of_obj_streams;
 
 }
 
@@ -248,6 +275,25 @@ async function addRow2(stream_driver, con) {
     }
 }
 
+async function addRow3(stream_driver, live_obj) {
+    try {
+        let title = await stream_driver.getTitle();
+        title = title.replace(/([\uE000-\uF8FF]|\uD83C[\uDF00-\uDFFF]|\uD83D[\uDC00-\uDDFF])/g, '');
+        title = title.replace(/[^\p{L}\p{N}\p{P}\p{Z}^$\n]/gu, '');
+        title = title.replace(/(['"])/g, '');
+        let views = await getViewers(stream_driver);
+        let channel = await getChannelNameFromStreamDriver(stream_driver)
+        let side = 'NaL';
+        let sql = `INSERT INTO db_sistema.${live_obj.country_name}_views_table 
+        (timestamp, views, channel, title) VALUES (CURRENT_TIME(),${views},'${channel}','${title}');`;
+
+        return sql;
+    }
+    catch(e) {
+        return 'nope'; //something threw
+    }
+}
+
 function equalsCheck(a, b) {
     return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -326,30 +372,112 @@ async function loadStreamTabs(list_of_lives, driver, con, check_lives_window) {
     await driver.switchTo().window(check_lives_window); 
 }
 
+async function loadStreamTabs_v2(list_of_obj_with_lives, driver, con, check_lives_window) {
+    let queries = [];
+    await driver.switchTo().newWindow('tab');
+    for(liveObj of list_of_obj_with_lives) {
+        if(liveObj.live_url == 'Empt') continue;
+        await driver.get(liveObj.live_url);
+        await delay(2000);
+        let query = await addRow3(driver, liveObj);
+        console.log(query);
+        if(query != 'nope') queries.push(query);
+    }
+    // for(let i = 0; i < queries.length; i++) {
+    //     con.query(queries[i], function (err, result) {
+    //         if (err) throw err;
+    //         console.log(queries[i]);
+    //     });
+    //     delay(500);
+    // }
+    await driver.close();
+    await driver.switchTo().window(check_lives_window); 
+}
+
+async function getLivesFromBatch(con, batch) {
+
+    let batch_csv = '';
+    for(let i = 0; i < batch.length; i++) {
+        if(i == batch.length - 1) batch_csv += batch[i];
+        else {
+            batch_csv += (batch[i] + ',');
+        }
+    }
+    let countries_to_track_sql = `SELECT country_name 
+    FROM db_sistema.countries_table 
+    WHERE country_id IN (${batch_csv});`;
+
+    let res = await query(con, countries_to_track_sql);
+
+    let batch_channels_list = []
+
+    for(let i = 0; i < res.length; i ++) {
+        let country_channels_sql = `
+        SELECT ChannelName, ChannelUrl 
+        FROM db_sistema.${res[i].country_name.toLowerCase().replaceAll(" ","_")}_table
+        WHERE SubsRank <= ${NUMBER_OF_CHANNELS_PER_COUNTRY}`;
+
+        let list_channels_urls = await query(con, country_channels_sql);
+        for(let k = 0; k < list_channels_urls.length; k++) {
+            list_channels_urls[k].country_name = res[i].country_name.toLowerCase().replaceAll(" ","_");
+            batch_channels_list.push(list_channels_urls[k])
+        }
+    }
+
+    return batch_channels_list;
+    // console.log(batch_csv);
+    // console.log(countries_to_track_sql);
+
+}
+
+async function query(con,sql) {
+    let p = new Promise((resolve, reject) => {
+        con.query(sql, function (err, result) {
+            if (err) throw err;
+            resolve(result);
+        });
+    })
+    return p;
+}
+
 async function main() {
+    let start = Date.now();
     let con = await connect(); // add redundances here later
     let driver = await new Builder()
       .forBrowser('firefox')
       .setFirefoxOptions(new firefox.Options().headless())
       .build();
 
-    let lives_list = await getLives(channels_list, driver);
+    let batch = process.argv[2].split(",");
+    let list_of_obj_without_lives = await getLivesFromBatch(con,batch);
+    console.log(list_of_obj_without_lives);
+    let list_of_obj_with_lives = await getLives_v2(list_of_obj_without_lives,driver);
+    console.log(list_of_obj_with_lives);
+
     let check_lives_window = await driver.getWindowHandle();
-    await loadStreamTabs(lives_list, driver, con, check_lives_window);
+    await loadStreamTabs_v2(list_of_obj_with_lives, driver, con, check_lives_window);
 
-    app.listen(port, async () => {
+    let end = Date.now();
+    console.log(`full cicle time: ${(end-start)/1000}s`)
+    process.exit(1);
 
-        console.log(`Example app listening on port ${port}`);
-        console.log(`Starting crom job..`);
-        setInterval(async () => {
+    // let lives_list = await getLives(channels_list, driver);
+    // let check_lives_window = await driver.getWindowHandle();
+    // await loadStreamTabs(lives_list, driver, con, check_lives_window);
+
+    // app.listen(port, async () => {
+
+    //     console.log(`Example app listening on port ${port}`);
+    //     console.log(`Starting crom job..`);
+    //     setInterval(async () => {
             
-            lives_list.length = 0;
-            lives_list = await getLives(channels_list, driver);
-            check_lives_window = await driver.getWindowHandle();
-            await loadStreamTabs(lives_list, driver, con, check_lives_window);
-        }
-        ,300000);
-    })
+    //         lives_list.length = 0;
+    //         lives_list = await getLives(channels_list, driver);
+    //         check_lives_window = await driver.getWindowHandle();
+    //         await loadStreamTabs(lives_list, driver, con, check_lives_window);
+    //     }
+    //     ,300000);
+    // })
 }
 
 main();
